@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Data persistence
+// ─── Data persistence ───────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -54,14 +54,14 @@ if (stones.length === 0) {
   saveJSON(STONES_FILE, stones);
 }
 
-// XP Packs
+// ─── XP Packs ───────────────────────────────────────────────────────
 const VALID_PACKS = ['spark', 'pebble', 'shard', 'fragment', 'chunk', 'boulder', 'monolith', 'obelisk', 'whale'];
 const XP_PACKS = {
   spark: 50, pebble: 150, shard: 500, fragment: 1500, chunk: 5000,
   boulder: 15000, monolith: 50000, obelisk: 150000, whale: 500000,
 };
 
-// Titles by XP
+// ─── Titles by XP ───────────────────────────────────────────────────
 function titleForXP(xp) {
   if (xp >= 500000) return 'Mythic';
   if (xp >= 150000) return 'Legendary';
@@ -75,7 +75,7 @@ function titleForXP(xp) {
   return 'Unranked';
 }
 
-// Custom rate limiter
+// ─── Custom rate limiter (express-rate-limit v8 is ESM-only) ────────
 function createRateLimiter(windowMs, maxReqs) {
   const hits = new Map();
   setInterval(() => hits.clear(), windowMs);
@@ -94,7 +94,7 @@ const generalLimiter = createRateLimiter(60000, 60);
 const authLimiter = createRateLimiter(60000, 10);
 const purchaseLimiter = createRateLimiter(60000, 15);
 
-// Input validation
+// ─── Input validation ───────────────────────────────────────────────
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
 const PROMO_RE = /^[A-Z0-9_]{3,30}$/;
 
@@ -109,7 +109,7 @@ function allowOnly(body, allowed) {
   return extra.length === 0;
 }
 
-// Middleware
+// ─── Middleware ──────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
   origin: true,
@@ -158,6 +158,8 @@ function requireAuth(req, res, next) {
   next();
 }
 
+// ─── Routes ─────────────────────────────────────────────────────────
+
 // Health
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
@@ -192,6 +194,7 @@ app.post('/api/login', authLimiter, (req, res) => {
   const user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
   if (!user) return res.status(404).json({ error: 'User not found' });
 
+  // Session fixation protection
   const oldSession = req.session;
   req.session.regenerate((err) => {
     if (err) {
@@ -221,6 +224,21 @@ app.get('/api/profile', requireAuth, (req, res) => {
 app.get('/api/stones/remaining', (req, res) => {
   const claimed = stones.filter(s => s.ownerId !== null).length;
   res.json({ remaining: stones.length - claimed, total: stones.length, claimed });
+});
+
+// My stone
+app.get('/api/stones/mine', requireAuth, (req, res) => {
+  const userId = Number(req.session.userId);
+  const stone = stones.find(s => Number(s.ownerId) === userId);
+  if (!stone) return res.status(404).json({ error: 'You don\'t own a stone yet' });
+  const user = users.find(u => Number(u.id) === userId);
+  res.json({
+    ...stone,
+    ownerUsername: user?.username || null,
+    ownerXp: user?.xp || null,
+    ownerTitle: user?.title || null,
+    ownerMemberNumber: user?.memberNumber || null,
+  });
 });
 
 // Claim stone
@@ -299,13 +317,26 @@ app.get('/api/leaderboard', (req, res) => {
   res.json({ entries: ranked, currentUserId });
 });
 
+// ─── Transaction dedup (prevents double-spend) ──────────────────────
+const processedTransactions = new Set();
+
 // Purchase XP
 app.post('/api/purchase-xp', requireAuth, purchaseLimiter, (req, res) => {
-  if (!allowOnly(req.body || {}, ['pack'])) return res.status(400).json({ error: 'Unexpected fields' });
-  const { pack } = req.body || {};
+  if (!allowOnly(req.body || {}, ['pack', 'transactionId'])) return res.status(400).json({ error: 'Unexpected fields' });
+  const { pack, transactionId } = req.body || {};
   if (!pack || !VALID_PACKS.includes(pack)) {
     return res.status(400).json({ error: 'Invalid pack. Valid: ' + VALID_PACKS.join(', ') });
   }
+
+  // Prevent double-spend: reject already-processed Apple transaction IDs
+  if (transactionId != null) {
+    const txKey = String(transactionId);
+    if (processedTransactions.has(txKey)) {
+      return res.status(409).json({ error: 'Transaction already processed' });
+    }
+    processedTransactions.add(txKey);
+  }
+
   const userId = Number(req.session.userId);
   const user = users.find(u => Number(u.id) === userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
@@ -338,13 +369,13 @@ app.post('/api/promo/verify', requireAuth, (req, res) => {
   });
 });
 
-// Error handler
+// ─── Error handler ──────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Start
+// ─── Start ──────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Stone Club API running on port ' + PORT);
   console.log('Environment: ' + (process.env.NODE_ENV || 'development'));
